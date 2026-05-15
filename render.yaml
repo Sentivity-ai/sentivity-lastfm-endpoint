@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: artist-mentions
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: LASTFM_API_KEY
+        sync: false
+      - key: LAST_WEEK_API_URL
+        value: https://artistcontext.onrender.com/map
+      - key: PYTHON_VERSION
+        value: 3.11.9
