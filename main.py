@@ -1,5 +1,7 @@
 import os
 import requests
+import tweepy
+import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -8,62 +10,115 @@ app = FastAPI(title="Sentivity Artist Mentions API")
 LASTFM_KEY = os.getenv("LASTFM_API_KEY", "c5f3e1407d1e1cd2d264ecc878590339")
 LASTFM_BASE = "http://ws.audioscrobbler.com/2.0/"
 
-# URL of your existing MAP API that already returns weekly mention data
-# Set this in Render env vars
 LAST_WEEK_API_URL = os.getenv(
     "LAST_WEEK_API_URL",
-    "https://artistcontext.onrender.com/map"
+    "https://artistcontext.onrender.com/map",
+)
+
+X_CONSUMER_KEY = os.getenv("X_CONSUMER_KEY")
+X_CONSUMER_SECRET = os.getenv("X_CONSUMER_SECRET")
+X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
+
+x_client = tweepy.Client(
+    consumer_key=X_CONSUMER_KEY,
+    consumer_secret=X_CONSUMER_SECRET,
+    bearer_token=X_BEARER_TOKEN,
 )
 
 
 # ---------------------------------------------------------------------------
-# Last.fm helper (Rowan's code)
+# Last.fm
 # ---------------------------------------------------------------------------
 def lastfm_get(method: str, **params) -> dict:
     r = requests.get(
         LASTFM_BASE,
-        params={
-            "method": method,
-            "api_key": LASTFM_KEY,
-            "format": "json",
-            **params,
-        },
+        params={"method": method, "api_key": LASTFM_KEY, "format": "json", **params},
         timeout=10,
     )
     r.raise_for_status()
     return r.json()
 
 
-def get_artist_mentions(artist_name: str) -> dict:
+def get_artist_stats(artist_name: str) -> dict:
     try:
+        info = lastfm_get("artist.getinfo", artist=artist_name)
+        stats = info["artist"]["stats"]
         search = lastfm_get("artist.search", artist=artist_name, limit=1)
-        total_results = int(search["results"]["opensearch:totalResults"])
-        return {"artist": artist_name, "mention_count": total_results}
+        return {
+            "artist": artist_name,
+            "listeners": int(stats["listeners"]),
+            "playcount": int(stats["playcount"]),
+            "mention_count": int(search["results"]["opensearch:totalResults"]),
+        }
     except Exception as e:
-        print(f"FAILED {artist_name}: {e}")
-        return {"artist": artist_name, "mention_count": None}
+        print(f"get_artist_stats FAILED [{artist_name}]: {e}")
+        return {"artist": artist_name, "listeners": None, "playcount": None, "mention_count": None}
 
 
 # ---------------------------------------------------------------------------
-# Pull last week's count from your existing MAP API
+# MAP API (last week)
 # ---------------------------------------------------------------------------
 def get_last_week_mention_count(artist_name: str) -> int:
-    """
-    Hits the existing MAP API to fetch the prior week's mention total.
-    Falls back to 0 if the call fails so the endpoint still returns.
-    """
+    url = f"{LAST_WEEK_API_URL}/{artist_name}/artist"
     try:
-        r = requests.get(
-            f"{LAST_WEEK_API_URL}/{artist_name}/artist",
-            timeout=15,
-        )
+        r = requests.get(url, timeout=30)
         r.raise_for_status()
         data = r.json()
-        # Adjust key path to match whatever MAP actually returns
-        return int(data.get("weekly_average") or data.get("mention_count") or 0)
+        value = data.get("weekly_average") or data.get("mention_count") or 0
+        print(f"last-week ok [{artist_name}]: {value} (keys: {list(data.keys())})")
+        return int(value)
     except Exception as e:
-        print(f"last-week fetch failed for {artist_name}: {e}")
+        print(f"last-week FAILED [{artist_name}] at {url}: {e}")
         return 0
+
+
+# ---------------------------------------------------------------------------
+# X engagement estimate 
+# ---------------------------------------------------------------------------
+def _clean_text(text: str) -> str:
+    return text.replace("\n", " ").strip()
+
+
+def get_x_estimate(artist_name: str, listeners: int, playcount: int) -> int:
+    """
+    Returns ONLY the estimated mention count from X (no Last.fm addition).
+    Returns 0 on any failure so the endpoint still serves a useful response.
+    """
+    if not listeners or not playcount:
+        print(f"x_estimate skipped [{artist_name}]: missing listeners/playcount")
+        return 0
+
+    query = f'"{artist_name}" -is:retweet lang:en'
+    max_results = 100
+
+    try:
+        response = x_client.search_recent_tweets(
+            query=query,
+            max_results=max_results,
+            tweet_fields=["created_at", "public_metrics", "text"],
+            sort_order="relevancy",
+        )
+    except Exception as e:
+        print(f"x_estimate search FAILED [{artist_name}]: {e}")
+        return 0
+
+    if not response.data:
+        return 0
+
+    df = pd.DataFrame([{
+        "likes": t.public_metrics.get("like_count", 0),
+        "replies": t.public_metrics.get("reply_count", 0),
+    } for t in response.data])
+
+    sample_size = len(df)
+    reply_sum = int(df["replies"].sum())
+    total_engaged = reply_sum + sample_size
+
+    conversion_rate = total_engaged / listeners if listeners else 0
+    estimated = (conversion_rate * playcount) / max_results
+
+    print(f"x_estimate [{artist_name}]: sample={sample_size} engaged={total_engaged} est={estimated:.1f}")
+    return round(estimated)
 
 
 # ---------------------------------------------------------------------------
@@ -75,9 +130,10 @@ class ArtistRequest(BaseModel):
 
 class MentionResponse(BaseModel):
     artist: str
-    current_mentions: int
-    last_week_mentions: int
-    total_mentions: int
+    current_mentions: int       # Last.fm artist.search result count
+    last_week_mentions: int     # from MAP API
+    x_mentions: int             # X engagement estimate
+    total_mentions: int         # sum of all three
 
 
 # ---------------------------------------------------------------------------
@@ -93,26 +149,31 @@ def artist_mentions_post(body: ArtistRequest):
     return _build_response(body.artist_name)
 
 
-# GET variant so Campbell's team can hit it the same way as MAP
 @app.get("/artist-mentions/{artist_name}", response_model=MentionResponse)
 def artist_mentions_get(artist_name: str):
     return _build_response(artist_name)
 
 
 def _build_response(artist_name: str) -> MentionResponse:
-    result = get_artist_mentions(artist_name)
-    if result["mention_count"] is None:
+    stats = get_artist_stats(artist_name)
+    if stats["mention_count"] is None:
         raise HTTPException(
             status_code=502,
-            detail=f"Could not fetch mentions for '{artist_name}' from Last.fm.",
+            detail=f"Could not fetch Last.fm stats for '{artist_name}'.",
         )
 
-    current = result["mention_count"]
+    current = stats["mention_count"]
     last_week = get_last_week_mention_count(artist_name)
+    x_est = get_x_estimate(
+        artist_name,
+        listeners=stats["listeners"] or 0,
+        playcount=stats["playcount"] or 0,
+    )
 
     return MentionResponse(
-        artist=result["artist"],
+        artist=stats["artist"],
         current_mentions=current,
         last_week_mentions=last_week,
-        total_mentions=current + last_week,
+        x_mentions=x_est,
+        total_mentions=current + last_week + x_est,
     )
