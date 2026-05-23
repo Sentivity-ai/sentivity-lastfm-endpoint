@@ -73,7 +73,7 @@ def get_last_week_mention_count(artist_name: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# X engagement estimate 
+# X engagement estimate
 # ---------------------------------------------------------------------------
 def _clean_text(text: str) -> str:
     return text.replace("\n", " ").strip()
@@ -130,10 +130,7 @@ class ArtistRequest(BaseModel):
 
 class MentionResponse(BaseModel):
     artist: str
-    current_mentions: int       # Last.fm artist.search result count
-    last_week_mentions: int     # from MAP API
-    x_mentions: int             # X engagement estimate
-    total_mentions: int         # sum of all three
+    mention_count: int
 
 
 # ---------------------------------------------------------------------------
@@ -170,10 +167,10 @@ def _build_response(artist_name: str) -> MentionResponse:
         playcount=stats["playcount"] or 0,
     )
 
+    total = current + last_week + x_est
+    print(f"[{artist_name}] current={current} last_week={last_week} x={x_est} total={total}")
+
     return MentionResponse(
         artist=stats["artist"],
-        current_mentions=current,
-        last_week_mentions=last_week,
-        x_mentions=x_est,
-        total_mentions=current + last_week + x_est,
+        mention_count=total,
     )
