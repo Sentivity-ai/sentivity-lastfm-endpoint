@@ -81,7 +81,7 @@ def _clean_text(text: str) -> str:
 
 def get_x_estimate(artist_name: str, listeners: int, playcount: int) -> int:
     """
-    Returns ONLY the estimated mention count from X (no Last.fm addition).
+    Returns ONLY the estimated mention count from X.
     Returns 0 on any failure so the endpoint still serves a useful response.
     """
     if not listeners or not playcount:
@@ -122,7 +122,7 @@ def get_x_estimate(artist_name: str, listeners: int, playcount: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Models
+# Models — matches the 5/23 shape Campbell built against
 # ---------------------------------------------------------------------------
 class ArtistRequest(BaseModel):
     artist_name: str
@@ -130,7 +130,10 @@ class ArtistRequest(BaseModel):
 
 class MentionResponse(BaseModel):
     artist: str
-    mention_count: int
+    current_mentions: int       # Last.fm artist.search result count
+    last_week_mentions: int     # from MAP API
+    x_mentions: int             # X engagement estimate
+    total_mentions: int         # sum of all three
 
 
 # ---------------------------------------------------------------------------
@@ -167,10 +170,10 @@ def _build_response(artist_name: str) -> MentionResponse:
         playcount=stats["playcount"] or 0,
     )
 
-    total = current + last_week + x_est
-    print(f"[{artist_name}] current={current} last_week={last_week} x={x_est} total={total}")
-
     return MentionResponse(
         artist=stats["artist"],
-        mention_count=total,
+        current_mentions=current,
+        last_week_mentions=last_week,
+        x_mentions=x_est,
+        total_mentions=current + last_week + x_est,
     )
