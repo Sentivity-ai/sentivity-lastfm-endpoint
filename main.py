@@ -10,8 +10,9 @@ app = FastAPI(title="Sentivity Artist Mentions API")
 LASTFM_KEY = os.getenv("LASTFM_API_KEY", "c5f3e1407d1e1cd2d264ecc878590339")
 LASTFM_BASE = "http://ws.audioscrobbler.com/2.0/"
 
-LAST_WEEK_API_URL = os.getenv(
-    "LAST_WEEK_API_URL",
+# OG MAP endpoint — accepts POST with {"artist": str, "context": str (optional)}
+MAP_API_URL = os.getenv(
+    "MAP_API_URL",
     "https://artistcontext.onrender.com/map",
 )
 
@@ -56,19 +57,26 @@ def get_artist_stats(artist_name: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# MAP API (last week)
+# OG MAP API — forwards context through so MAP can use it
 # ---------------------------------------------------------------------------
-def get_last_week_mention_count(artist_name: str) -> int:
-    url = f"{LAST_WEEK_API_URL}/{artist_name}/artist"
+def get_last_week_mention_count(artist_name: str, context: str | None = None) -> int:
+    """
+    POST to OG MAP with artist + context. Returns mention_count from response,
+    or 0 on failure so the endpoint stays serving.
+    """
+    payload = {"artist": artist_name}
+    if context is not None:
+        payload["context"] = context
+
     try:
-        r = requests.get(url, timeout=30)
+        r = requests.post(MAP_API_URL, json=payload, timeout=30)
         r.raise_for_status()
         data = r.json()
-        value = data.get("weekly_average") or data.get("mention_count") or 0
-        print(f"last-week ok [{artist_name}]: {value} (keys: {list(data.keys())})")
-        return int(value)
+        value = int(data.get("mention_count", 0))
+        print(f"map ok [{artist_name}] context={context!r}: mention_count={value} keys={list(data.keys())}")
+        return value
     except Exception as e:
-        print(f"last-week FAILED [{artist_name}] at {url}: {e}")
+        print(f"map FAILED [{artist_name}] context={context!r} at {MAP_API_URL}: {e}")
         return 0
 
 
@@ -80,10 +88,6 @@ def _clean_text(text: str) -> str:
 
 
 def get_x_estimate(artist_name: str, listeners: int, playcount: int) -> int:
-    """
-    Returns ONLY the estimated mention count from X.
-    Returns 0 on any failure so the endpoint still serves a useful response.
-    """
     if not listeners or not playcount:
         print(f"x_estimate skipped [{artist_name}]: missing listeners/playcount")
         return 0
@@ -122,18 +126,19 @@ def get_x_estimate(artist_name: str, listeners: int, playcount: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Models — matches the 5/23 shape Campbell built against
+# Models
 # ---------------------------------------------------------------------------
 class ArtistRequest(BaseModel):
     artist_name: str
+    context: str | None = None
 
 
 class MentionResponse(BaseModel):
     artist: str
-    current_mentions: int       # Last.fm artist.search result count
-    last_week_mentions: int     # from MAP API
-    x_mentions: int             # X engagement estimate
-    total_mentions: int         # sum of all three
+    current_mentions: int
+    last_week_mentions: int
+    x_mentions: int
+    total_mentions: int
 
 
 # ---------------------------------------------------------------------------
@@ -146,15 +151,17 @@ def health():
 
 @app.post("/artist-mentions", response_model=MentionResponse)
 def artist_mentions_post(body: ArtistRequest):
-    return _build_response(body.artist_name)
+    return _build_response(body.artist_name, body.context)
 
 
 @app.get("/artist-mentions/{artist_name}", response_model=MentionResponse)
-def artist_mentions_get(artist_name: str):
-    return _build_response(artist_name)
+def artist_mentions_get(artist_name: str, context: str | None = None):
+    return _build_response(artist_name, context)
 
 
-def _build_response(artist_name: str) -> MentionResponse:
+def _build_response(artist_name: str, context: str | None = None) -> MentionResponse:
+    print(f"request [{artist_name}] context={context!r}")
+
     stats = get_artist_stats(artist_name)
     if stats["mention_count"] is None:
         raise HTTPException(
@@ -163,7 +170,7 @@ def _build_response(artist_name: str) -> MentionResponse:
         )
 
     current = stats["mention_count"]
-    last_week = get_last_week_mention_count(artist_name)
+    last_week = get_last_week_mention_count(artist_name, context=context)
     x_est = get_x_estimate(
         artist_name,
         listeners=stats["listeners"] or 0,
