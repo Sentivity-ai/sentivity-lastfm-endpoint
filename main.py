@@ -60,23 +60,17 @@ def get_artist_stats(artist_name: str) -> dict:
 # OG MAP API — forwards context through so MAP can use it
 # ---------------------------------------------------------------------------
 def get_last_week_mention_count(artist_name: str, context: str | None = None) -> int:
-    """
-    POST to OG MAP with artist + context. Returns mention_count from response,
-    or 0 on failure so the endpoint stays serving.
-    """
-    payload = {"artist": artist_name}
-    if context is not None:
-        payload["context"] = context
-
+    ctx = context or "music"
+    url = f"{MAP_API_URL.replace('/map', '')}/map/{requests.utils.quote(artist_name)}/{requests.utils.quote(ctx)}"
     try:
-        r = requests.post(MAP_API_URL, json=payload, timeout=30)
+        r = requests.get(url, timeout=30)
         r.raise_for_status()
         data = r.json()
         value = int(data.get("mention_count", 0))
-        print(f"map ok [{artist_name}] context={context!r}: mention_count={value} keys={list(data.keys())}")
+        print(f"map ok [{artist_name}] context={ctx!r}: mention_count={value}")
         return value
     except Exception as e:
-        print(f"map FAILED [{artist_name}] context={context!r} at {MAP_API_URL}: {e}")
+        print(f"map FAILED [{artist_name}] context={ctx!r}: {e}")
         return 0
 
 
